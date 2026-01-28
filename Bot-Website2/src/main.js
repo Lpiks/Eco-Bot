@@ -40,6 +40,26 @@ async function processOrder(iteration) {
             return;
         }
 
+        // --- Warm Up (Human Behavior) ---
+        logger.info('Warming up profile...');
+        try {
+            // Random mouse moves
+            for (let k = 0; k < 3; k++) {
+                await page.mouse.move(
+                    Math.floor(Math.random() * 500),
+                    Math.floor(Math.random() * 500)
+                );
+                await new Promise(r => setTimeout(r, Math.random() * 1000 + 500));
+            }
+            // Small scroll
+            await page.evaluate(() => {
+                window.scrollBy(0, window.innerHeight * Math.random());
+            });
+            await new Promise(r => setTimeout(r, Math.random() * 2000 + 1000));
+        } catch (e) {
+            logger.warn('Warm up deviation:', e);
+        }
+
         // --- Interaction Logic (JustSell) ---
 
         // 1. Full Name

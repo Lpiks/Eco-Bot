@@ -31,18 +31,35 @@ class DataGenerator {
     }
 
     generateRealisticName() {
-        // Faker's default might be too western, let's try to mix it or just use it for now.
-        // For better realism, we could define a list of common Algerian names, 
-        // but faker is acceptable for a first pass as requested.
-        // Or we can use faker with a specific locale if available (fr is closest supported usually).
-        // faker.locale = 'fr'; // (In newer faker versions, we might need to import locale-specific instance)
-        return faker.person.fullName();
+        const firstNames = [
+            "محمد", "أحمد", "ياسين", "عبد الله", "يوسف", "أمين", "علي", "وليد", "كريم", "عمر",
+            "مريم", "فاطمة", "آسيا", "سارة", "خديجة", "عائشة", "نورة", "ليلى", "أسماء", "هدى"
+        ];
+        const lastNames = [
+            "بن أحمد", "ساعدي", "بورحلة", "منصوري", "تواتي", "رحماني", "يحيى", "بن يوسف",
+            "العمري", "بوعزيز", "حداد", "سليماني", "موساوي", "بلحاج", "قاسم", "بن علي", "مزيان"
+        ];
+
+        const firstName = firstNames[Math.floor(Math.random() * firstNames.length)];
+        const lastName = lastNames[Math.floor(Math.random() * lastNames.length)];
+
+        return `${firstName} ${lastName}`;
     }
 
     generateAlgerianPhone() {
         const prefixes = ['05', '06', '07'];
         const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-        const suffix = faker.string.numeric(8);
+
+        let suffix;
+        if (prefix === '05') {
+            // Adds 55 or 56 after 05, then 6 random digits
+            const subPrefix = Math.random() < 0.5 ? '55' : '56';
+            suffix = subPrefix + faker.string.numeric(6);
+        } else {
+            // Default behavior for other prefixes (8 random digits)
+            suffix = faker.string.numeric(8);
+        }
+
         return `${prefix}${suffix}`;
     }
 }
