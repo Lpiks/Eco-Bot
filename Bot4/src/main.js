@@ -51,117 +51,136 @@ async function processOrder(iteration) {
                 );
                 await new Promise(r => setTimeout(r, Math.random() * 1000 + 500));
             }
-            // Small scroll
-            await page.evaluate(() => {
-                window.scrollBy(0, window.innerHeight * Math.random());
-            });
-            await new Promise(r => setTimeout(r, Math.random() * 2000 + 1000));
-        } catch (e) {
-            logger.warn('Warm up deviation:', e);
-        }
+        } catch (e) { }
 
-        // --- Interaction Logic (JustSell) ---
+        // --- Interaction Logic (LightFunnels) ---
 
         // 1. Full Name
-        const nameInput = 'input[name="userName"]';
+        const nameInput = 'input[name="first_name"]';
         if (await page.$(nameInput)) {
             await actionManager.typeHuman(nameInput, identity.fullName);
         } else {
-            logger.warn('Name input (userName) not found');
+            logger.warn('Name input (first_name) not found');
         }
 
         // 2. Phone
-        const phoneInput = 'input[name="userPhone"]';
+        const phoneInput = 'input[name="phone"]';
         if (await page.$(phoneInput)) {
-            await actionManager.typeHuman(phoneInput, identity.phone);
+            const phone = identity.phone.startsWith('0') ? identity.phone : '0' + identity.phone;
+            await actionManager.typeHuman(phoneInput, phone);
         } else {
-            logger.warn('Phone input (userPhone) not found');
+            logger.warn('Phone input (phone) not found');
         }
 
-        // 3. Wilaya (Dropdown)
-        const wilayaSelect = '#userCity';
-        try {
-            const wilayaCode = identity.wilayaCode;
-            const targetValue = await page.$eval(wilayaSelect, (select, code) => {
-                const options = Array.from(select.options);
-                const option = options.find(opt => opt.value.startsWith(code + '|') || opt.value === code);
-                return option ? option.value : null;
-            }, wilayaCode);
+        // 3. Wilaya (Readonly Input -> Click -> Select ANY Random Option)
+        const wilayaInput = 'input[name="state"]';
+        if (await page.$(wilayaInput)) {
+            try {
+                logger.info('Clicking Wilaya input to open dropdown...');
+                await page.click(wilayaInput);
+                await new Promise(r => setTimeout(r, 1500)); // Wait for dropdown animation
 
-            if (targetValue) {
-                await actionManager.selectOption(wilayaSelect, targetValue);
-                logger.info(`Selected Wilaya: ${identity.wilaya} (Value: ${targetValue})`);
-            } else {
-                logger.warn(`Wilaya option matching code ${wilayaCode} not found.`);
-            }
-        } catch (e) {
-            logger.warn(`Wilaya selection failed: ${e.message}`);
-        }
+                logger.info('Selecting a RANDOM Wilaya option as requested...');
 
-        // 4. Commune (Dropdown)
-        const communeSelect = '#userState';
-        try {
-            await page.waitForFunction(
-                (selector) => {
-                    const el = document.querySelector(selector);
-                    return el && !el.disabled && el.options.length > 1;
-                },
-                { timeout: 15000 },
-                communeSelect
-            );
+                // Broad selector for any list item or option-like div
+                // We avoid the first one if it's "Search" or a header, usually index 0 might be search input parent
+                const optionsXpath = `//div[@role="option"] | //li | //div[contains(@class, "item")]`;
+                let options = await page.$x(optionsXpath);
 
-            const communeName = identity.commune;
-            const communeValue = await page.$eval(communeSelect, (select, name) => {
-                const options = Array.from(select.options);
-                const option = options.find(opt => opt.text.includes(name));
-                return option ? option.value : null;
-            }, communeName);
+                if (options.length > 0) {
+                    // Pick a random index. If list is small, pick index 0 or 1.
+                    // If list is large (Wilayas), pick between 1 and min(length, 10) to avoid scrolling too far
+                    const maxIndex = Math.min(options.length - 1, 10);
+                    const randomIndex = Math.floor(Math.random() * (maxIndex + 1));
 
-            if (communeValue) {
-                await actionManager.selectOption(communeSelect, communeValue);
-                logger.info(`Selected Commune: ${communeName} (Value: ${communeValue})`);
-            } else {
-                logger.warn(`Commune '${communeName}' not found in dropdown. Selecting random available option.`);
-                const randomValue = await page.$eval(communeSelect, select => {
-                    if (select.options.length > 1) {
-                        const idx = Math.floor(Math.random() * (select.options.length - 1)) + 1;
-                        return select.options[idx].value;
+                    try {
+                        // Ensure it's visible or scroll to it
+                        await options[randomIndex].click();
+                        logger.info(`Clicked option at index ${randomIndex}`);
+                    } catch (clickErr) {
+                        logger.warn(`Failed to click random option ${randomIndex}, trying index 0...`);
+                        await options[0].click();
                     }
-                    return null;
-                });
-                if (randomValue) {
-                    await actionManager.selectOption(communeSelect, randomValue);
-                    logger.info(`Selected Random Commune Value: ${randomValue}`);
+                } else {
+                    // Fallback: strict text search not used, but we might just click the 2nd div in the container
+                    logger.warn('No standard options found. Trying generic div click in listbox.');
+                    const genericXpath = `//div[@role="listbox"]//div`;
+                    options = await page.$x(genericXpath);
+                    if (options.length > 1) {
+                        await options[1].click(); // Click 2nd element
+                    }
                 }
+            } catch (e) {
+                logger.warn(`Wilaya selection failed: ${e.message}`);
+                await actionManager.takeScreenshot(`wilaya_fail_${iteration}`);
             }
-        } catch (e) {
-            logger.warn(`Commune wait/select failed: ${e.message}`);
+        } else {
+            logger.warn('Wilaya input (name="state") not found');
+        }
+
+        // 4. Commune (City) - Strict Wait
+        const communeInput = 'input[name="city"]';
+        if (await page.$(communeInput)) {
+            // Check if Wilaya has value
+            const wilayaInputEl = await page.$('input[name="state"]');
+            if (wilayaInputEl) {
+                let wilayaValue = await page.evaluate(el => el.value, wilayaInputEl);
+                let retries = 0;
+                while (!wilayaValue && retries < 15) {
+                    logger.info('Waiting for Wilaya to be filled...');
+                    await new Promise(r => setTimeout(r, 1000));
+                    wilayaValue = await page.evaluate(el => el.value, wilayaInputEl);
+                    retries++;
+                }
+                if (!wilayaValue) logger.warn('Proceeding to Commune despite empty Wilaya.');
+            }
+            await actionManager.typeHuman(communeInput, identity.commune);
+        } else {
+            logger.warn('Commune input (name="city") not found');
         }
 
         // 5. Quantity
-        const qtyInput = '#quantity';
+        const qtyInput = 'input[type="number"]';
         if (await page.$(qtyInput)) {
-            await page.$eval(qtyInput, el => el.value = '');
-            await actionManager.typeHuman(qtyInput, identity.quantity.toString());
+            try {
+                let qty = identity.quantity;
+                if (qty > 3) qty = 3;
+                await page.evaluate(el => el.value = '', await page.$(qtyInput));
+                await actionManager.typeHuman(qtyInput, qty.toString());
+            } catch (e) {
+                logger.warn('Failed to set quantity:', e);
+            }
         }
 
         // 6. Submit
         if (config.DRY_RUN) {
             logger.info('DRY RUN MODE: Skipping final submit click.');
         } else {
-            const submitBtnSelector = 'button[type="submit"].btn-theme-primary';
-            const btn = await page.$(submitBtnSelector);
+            try {
+                const btnSelector = 'button._98';
+                const btnXpath = `//button[contains(., "اشتري")]`;
+                const btnGeneric = 'button[type="submit"]';
 
-            if (btn) {
-                await btn.click();
-                logger.info('Clicked Submit button.');
-                try {
-                    await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle0' });
-                } catch (e) {
-                    logger.warn('No navigation detected. Checking for success message or validation errors.');
+                let submitBtn = await page.$(btnSelector);
+                if (!submitBtn) {
+                    const [btn] = await page.$x(btnXpath);
+                    submitBtn = btn;
                 }
-            } else {
-                logger.warn('Submit button not found.');
+                if (!submitBtn) submitBtn = await page.$(btnGeneric);
+
+                if (submitBtn) {
+                    try { await page.evaluate(el => el.scrollIntoView(), submitBtn); } catch (e) { }
+                    await new Promise(r => setTimeout(r, 500));
+                    await submitBtn.click();
+                    logger.info('Clicked Submit button.');
+                    try { await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle0' }); } catch (navErr) { }
+                } else {
+                    logger.warn('Submit button NOT found.');
+                    await actionManager.takeScreenshot(`missing_submit_btn_${iteration}`);
+                }
+            } catch (e) {
+                logger.warn(`Submit failed: ${e.message}`);
+                await actionManager.takeScreenshot(`submit_error_${iteration}`);
             }
         }
 
@@ -185,8 +204,11 @@ async function run() {
         await processOrder(i);
 
         if (i < LOOP_COUNT) {
-            const delay = Math.floor(Math.random() * 5000) + 2000; // 2-7 seconds delay
-            logger.info(`Waiting ${delay}ms before next iteration...`);
+            // Random delay between 1 and 5 minutes
+            const delay = Math.floor(Math.random() * (300000 - 60000 + 1)) + 60000;
+            const minutes = Math.floor(delay / 60000);
+            const seconds = Math.floor((delay % 60000) / 1000);
+            logger.info(`Waiting ${minutes}m ${seconds}s before next iteration...`);
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }

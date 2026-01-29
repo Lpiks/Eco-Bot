@@ -60,47 +60,63 @@ async function processOrder(iteration) {
             logger.warn('Warm up deviation:', e);
         }
 
-        // --- Interaction Logic (JustSell) ---
+        // --- Interaction Logic (Selling-Hub LeadForm) ---
+
+        // Wait for container
+        try {
+            await page.waitForSelector('#lfcod-main', { timeout: 15000 });
+        } catch (e) {
+            logger.warn('LeadForm container (#lfcod-main) not found immediately.');
+        }
 
         // 1. Full Name
-        const nameInput = 'input[name="userName"]';
+        const nameInput = '#lfcod_first_name';
         if (await page.$(nameInput)) {
             await actionManager.typeHuman(nameInput, identity.fullName);
         } else {
-            logger.warn('Name input (userName) not found');
+            logger.warn('Name input (#lfcod_first_name) not found');
         }
 
         // 2. Phone
-        const phoneInput = 'input[name="userPhone"]';
+        const phoneInput = '#lfcod_phone';
         if (await page.$(phoneInput)) {
-            await actionManager.typeHuman(phoneInput, identity.phone);
+            // Remove leading '0' if present, as the form likely has +213 prefix
+            const phone = identity.phone.startsWith('0') ? identity.phone.substring(1) : identity.phone;
+            await actionManager.typeHuman(phoneInput, phone);
         } else {
-            logger.warn('Phone input (userPhone) not found');
+            logger.warn('Phone input (#lfcod_phone) not found');
         }
 
-        // 3. Wilaya (Dropdown)
-        const wilayaSelect = '#userCity';
+        // 3. Wilaya (Select by data-id matching Code)
+        const wilayaSelect = '#lfcod_province';
         try {
-            const wilayaCode = identity.wilayaCode;
+            await page.waitForSelector(wilayaSelect, { visible: true });
+            const wilayaCode = identity.wilayaCode; // e.g. "1" or "01"
+
+            // Logic: Find option where data-id == wilayaCode
             const targetValue = await page.$eval(wilayaSelect, (select, code) => {
                 const options = Array.from(select.options);
-                const option = options.find(opt => opt.value.startsWith(code + '|') || opt.value === code);
+                // Check data-id (dataset.id) loosely (1 == '1')
+                const option = options.find(opt => {
+                    return (opt.dataset && opt.dataset.id == code) || opt.value === code;
+                });
                 return option ? option.value : null;
             }, wilayaCode);
 
             if (targetValue) {
-                await actionManager.selectOption(wilayaSelect, targetValue);
-                logger.info(`Selected Wilaya: ${identity.wilaya} (Value: ${targetValue})`);
+                await page.select(wilayaSelect, targetValue);
+                logger.info(`Selected Wilaya: ${identity.wilaya} (Value: ${targetValue}, Code: ${wilayaCode})`);
             } else {
-                logger.warn(`Wilaya option matching code ${wilayaCode} not found.`);
+                logger.warn(`Wilaya option for code ${wilayaCode} not found in #lfcod_province.`);
             }
         } catch (e) {
             logger.warn(`Wilaya selection failed: ${e.message}`);
         }
 
-        // 4. Commune (Dropdown)
-        const communeSelect = '#userState';
+        // 4. Commune (City) - Wait for load then Select by Text
+        const communeSelect = '#lfcod_city';
         try {
+            // Wait for options to populate (length > 1)
             await page.waitForFunction(
                 (selector) => {
                     const el = document.querySelector(selector);
@@ -111,17 +127,18 @@ async function processOrder(iteration) {
             );
 
             const communeName = identity.commune;
+            // Try partial text match
             const communeValue = await page.$eval(communeSelect, (select, name) => {
                 const options = Array.from(select.options);
-                const option = options.find(opt => opt.text.includes(name));
+                const option = options.find(opt => opt.text.includes(name) || name.includes(opt.text));
                 return option ? option.value : null;
             }, communeName);
 
             if (communeValue) {
-                await actionManager.selectOption(communeSelect, communeValue);
+                await page.select(communeSelect, communeValue);
                 logger.info(`Selected Commune: ${communeName} (Value: ${communeValue})`);
             } else {
-                logger.warn(`Commune '${communeName}' not found in dropdown. Selecting random available option.`);
+                logger.warn(`Commune '${communeName}' not found. Selecting random available option.`);
                 const randomValue = await page.$eval(communeSelect, select => {
                     if (select.options.length > 1) {
                         const idx = Math.floor(Math.random() * (select.options.length - 1)) + 1;
@@ -130,7 +147,7 @@ async function processOrder(iteration) {
                     return null;
                 });
                 if (randomValue) {
-                    await actionManager.selectOption(communeSelect, randomValue);
+                    await page.select(communeSelect, randomValue);
                     logger.info(`Selected Random Commune Value: ${randomValue}`);
                 }
             }
@@ -138,30 +155,51 @@ async function processOrder(iteration) {
             logger.warn(`Commune wait/select failed: ${e.message}`);
         }
 
-        // 5. Quantity
-        const qtyInput = '#quantity';
-        if (await page.$(qtyInput)) {
-            await page.$eval(qtyInput, el => el.value = '');
-            await actionManager.typeHuman(qtyInput, identity.quantity.toString());
+        // 4.5 Address (Randomly Generated for the specific Commune)
+        const addressInput = '#lfcod_address1';
+        if (await page.$(addressInput)) {
+            const addressPrefixes = [
+                'Cité 500 Logements',
+                'Rue de la Liberté',
+                'Hai El Salam',
+                'Lotissement 15',
+                'Centre Ville',
+                'Rue Principale',
+                'Cité 20 Août 1955',
+                'Route Nationale'
+            ];
+            const randomPrefix = addressPrefixes[Math.floor(Math.random() * addressPrefixes.length)];
+            // Use identity.commune if available, otherwise fallback
+            const communeName = identity.commune || 'Centre';
+            const fullAddress = `${randomPrefix}, ${communeName}`;
+
+            await actionManager.typeHuman(addressInput, fullAddress);
+            logger.info(`Entered Address: ${fullAddress}`);
+        } else {
+            logger.warn('Address input (#lfcod_address1) not found');
         }
+
+        // 5. Quantity (Default is 1)
+        // #lfcod-quantity-input .lfcod-qty
 
         // 6. Submit
         if (config.DRY_RUN) {
             logger.info('DRY RUN MODE: Skipping final submit click.');
         } else {
-            const submitBtnSelector = 'button[type="submit"].btn-theme-primary';
+            const submitBtnSelector = '#lfcod-send-btn';
             const btn = await page.$(submitBtnSelector);
 
             if (btn) {
                 await btn.click();
-                logger.info('Clicked Submit button.');
+                logger.info('Clicked Submit button (#lfcod-send-btn).');
                 try {
+                    // Check for common success signals or navigation
                     await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle0' });
                 } catch (e) {
-                    logger.warn('No navigation detected. Checking for success message or validation errors.');
+                    logger.warn('No navigation detected after submit (could be SPA or success modal).');
                 }
             } else {
-                logger.warn('Submit button not found.');
+                logger.warn('Submit button (#lfcod-send-btn) not found.');
             }
         }
 
@@ -185,8 +223,13 @@ async function run() {
         await processOrder(i);
 
         if (i < LOOP_COUNT) {
-            const delay = Math.floor(Math.random() * 5000) + 2000; // 2-7 seconds delay
-            logger.info(`Waiting ${delay}ms before next iteration...`);
+            // Delay between 1 minute (60000ms) and 5 minutes (300000ms)
+            const minDelay = 60000;
+            const maxDelay = 300000;
+            const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+
+            const delayInMinutes = (delay / 60000).toFixed(2);
+            logger.info(`Waiting ${delay}ms (~${delayInMinutes} minutes) before next iteration...`);
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }

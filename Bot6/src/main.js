@@ -60,108 +60,137 @@ async function processOrder(iteration) {
             logger.warn('Warm up deviation:', e);
         }
 
-        // --- Interaction Logic (JustSell) ---
+        // --- Interaction Logic (WooCommerce / CodPlugin) ---
 
         // 1. Full Name
-        const nameInput = 'input[name="userName"]';
+        const nameInput = 'input[name="full_name"]';
         if (await page.$(nameInput)) {
             await actionManager.typeHuman(nameInput, identity.fullName);
         } else {
-            logger.warn('Name input (userName) not found');
+            logger.warn('Name input (full_name) not found');
         }
 
         // 2. Phone
-        const phoneInput = 'input[name="userPhone"]';
+        const phoneInput = 'input[name="phone_number"]';
         if (await page.$(phoneInput)) {
-            await actionManager.typeHuman(phoneInput, identity.phone);
+            // Ensure leading '0' just in case, though format usually standard
+            const phone = identity.phone.startsWith('0') ? identity.phone : '0' + identity.phone;
+            await actionManager.typeHuman(phoneInput, phone);
         } else {
-            logger.warn('Phone input (userPhone) not found');
+            logger.warn('Phone input (phone_number) not found');
         }
 
-        // 3. Wilaya (Dropdown)
-        const wilayaSelect = '#userCity';
-        try {
-            const wilayaCode = identity.wilayaCode;
-            const targetValue = await page.$eval(wilayaSelect, (select, code) => {
-                const options = Array.from(select.options);
-                const option = options.find(opt => opt.value.startsWith(code + '|') || opt.value === code);
-                return option ? option.value : null;
-            }, wilayaCode);
+        // 3. Wilaya (Native Select)
+        const wilayaSelect = 'select[name="codplugin_state"]';
+        if (await page.$(wilayaSelect)) {
+            try {
+                const wilayaCode = identity.wilayaCode.toString().padStart(2, '0'); // e.g. "01"
 
-            if (targetValue) {
-                await actionManager.selectOption(wilayaSelect, targetValue);
-                logger.info(`Selected Wilaya: ${identity.wilaya} (Value: ${targetValue})`);
-            } else {
-                logger.warn(`Wilaya option matching code ${wilayaCode} not found.`);
-            }
-        } catch (e) {
-            logger.warn(`Wilaya selection failed: ${e.message}`);
-        }
+                // Find option value that matches "DZ-01" pattern or similar
+                const targetValue = await page.$eval(wilayaSelect, (select, code) => {
+                    const options = Array.from(select.options);
+                    // Match value "DZ-01" or text containing the code/name
+                    const option = options.find(opt =>
+                        opt.value === `DZ-${code}` ||
+                        opt.text.includes(`${code} `) ||
+                        opt.text.startsWith(code)
+                    );
+                    return option ? option.value : null;
+                }, wilayaCode);
 
-        // 4. Commune (Dropdown)
-        const communeSelect = '#userState';
-        try {
-            await page.waitForFunction(
-                (selector) => {
-                    const el = document.querySelector(selector);
-                    return el && !el.disabled && el.options.length > 1;
-                },
-                { timeout: 15000 },
-                communeSelect
-            );
-
-            const communeName = identity.commune;
-            const communeValue = await page.$eval(communeSelect, (select, name) => {
-                const options = Array.from(select.options);
-                const option = options.find(opt => opt.text.includes(name));
-                return option ? option.value : null;
-            }, communeName);
-
-            if (communeValue) {
-                await actionManager.selectOption(communeSelect, communeValue);
-                logger.info(`Selected Commune: ${communeName} (Value: ${communeValue})`);
-            } else {
-                logger.warn(`Commune '${communeName}' not found in dropdown. Selecting random available option.`);
-                const randomValue = await page.$eval(communeSelect, select => {
-                    if (select.options.length > 1) {
-                        const idx = Math.floor(Math.random() * (select.options.length - 1)) + 1;
-                        return select.options[idx].value;
-                    }
-                    return null;
-                });
-                if (randomValue) {
-                    await actionManager.selectOption(communeSelect, randomValue);
-                    logger.info(`Selected Random Commune Value: ${randomValue}`);
+                if (targetValue) {
+                    await page.select(wilayaSelect, targetValue);
+                    logger.info(`Selected Wilaya: ${targetValue}`);
+                } else {
+                    logger.warn(`Specific Wilaya code ${wilayaCode} not found. Selecting Random...`);
+                    // Random selection excluding the placeholder (usually index 0)
+                    await page.$eval(wilayaSelect, select => {
+                        const count = select.options.length;
+                        if (count > 1) {
+                            select.selectedIndex = Math.floor(Math.random() * (count - 1)) + 1;
+                            select.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+                    });
                 }
+                await new Promise(r => setTimeout(r, 1000)); // Wait for AJAX to load communes
+            } catch (e) {
+                logger.warn(`Wilaya selection failed: ${e.message}`);
             }
-        } catch (e) {
-            logger.warn(`Commune wait/select failed: ${e.message}`);
+        } else {
+            logger.warn('Wilaya select (codplugin_state) not found');
         }
 
-        // 5. Quantity
-        const qtyInput = '#quantity';
-        if (await page.$(qtyInput)) {
-            await page.$eval(qtyInput, el => el.value = '');
-            await actionManager.typeHuman(qtyInput, identity.quantity.toString());
+        // 4. Commune (Native Select - Wait for population)
+        const communeSelect = 'select[name="codplugin_city"]';
+        if (await page.$(communeSelect)) {
+            try {
+                // Wait for options to populate (length > 1)
+                await page.waitForFunction(
+                    (selector) => {
+                        const el = document.querySelector(selector);
+                        return el && el.options.length > 1;
+                    },
+                    { timeout: 10000 },
+                    communeSelect
+                );
+
+                // Select a random commune (safe bet as mapping names is hard without exact list)
+                // Or try to fuzzy match if we really wanted to
+                await page.$eval(communeSelect, select => {
+                    const count = select.options.length;
+                    if (count > 1) {
+                        // Pick random index from 1 to count-1
+                        const idx = Math.floor(Math.random() * (count - 1)) + 1;
+                        select.selectedIndex = idx;
+                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                });
+                logger.info('Selected Random Commune.');
+            } catch (e) {
+                logger.warn('Commune selection failed (or timed out waiting for options):', e.message);
+            }
+        } else {
+            logger.warn('Commune select (codplugin_city) not found');
         }
+
+        // 5. Quantity / Product Variation (Radio)
+        // Usually handled by default selection, but we can ensure one is checked
+        // If there's a quantity counter:
+        /*
+        const qtyAddBtn = '#codplugin_add_button';
+        if (await page.$(qtyAddBtn)) {
+             // Logic to click add button based on identity.quantity
+        }
+        */
 
         // 6. Submit
         if (config.DRY_RUN) {
             logger.info('DRY RUN MODE: Skipping final submit click.');
         } else {
-            const submitBtnSelector = 'button[type="submit"].btn-theme-primary';
-            const btn = await page.$(submitBtnSelector);
+            try {
+                const submitSelector = 'input[name="codplugin-submit"]';
+                const submitBtn = await page.$(submitSelector);
 
-            if (btn) {
-                await btn.click();
-                logger.info('Clicked Submit button.');
-                try {
-                    await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle0' });
-                } catch (e) {
-                    logger.warn('No navigation detected. Checking for success message or validation errors.');
+                if (submitBtn) {
+                    await page.evaluate(el => el.scrollIntoView(), submitBtn);
+                    await new Promise(r => setTimeout(r, 500));
+
+                    await submitBtn.click();
+                    logger.info('Clicked Submit button.');
+
+                    // Wait for success navigation
+                    try {
+                        await page.waitForNavigation({ timeout: 15000, waitUntil: 'networkidle0' });
+                    } catch (navErr) {
+                        logger.info('Navigation timeout. Checking for success URL/Element.');
+                    }
+                } else {
+                    logger.warn('Submit button not found.');
+                    await actionManager.takeScreenshot(`missing_submit_btn_${iteration}`);
                 }
-            } else {
-                logger.warn('Submit button not found.');
+            } catch (e) {
+                logger.warn(`Submit failed: ${e.message}`);
+                await actionManager.takeScreenshot(`submit_error_${iteration}`);
             }
         }
 
@@ -178,15 +207,18 @@ async function processOrder(iteration) {
 }
 
 async function run() {
-    const LOOP_COUNT = 20;
+    const LOOP_COUNT = 30;
     logger.info(`Starting Bot Run: ${LOOP_COUNT} iterations scheduled.`);
 
     for (let i = 1; i <= LOOP_COUNT; i++) {
         await processOrder(i);
 
         if (i < LOOP_COUNT) {
-            const delay = Math.floor(Math.random() * 5000) + 2000; // 2-7 seconds delay
-            logger.info(`Waiting ${delay}ms before next iteration...`);
+            // Random delay between 1 and 5 minutes (60000ms to 300000ms)
+            const delay = Math.floor(Math.random() * (300000 - 60000 + 1)) + 60000;
+            const minutes = Math.floor(delay / 60000);
+            const seconds = Math.floor((delay % 60000) / 1000);
+            logger.info(`Waiting ${minutes}m ${seconds}s before next iteration...`);
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }

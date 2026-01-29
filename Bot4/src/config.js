@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 module.exports = {
-    TARGET_URL: process.env.TARGET_URL || 'https://google.com', // Placeholder
+    TARGET_URL: process.env.TARGET_URL || 'https://callidy-market.myecomsite.net/cable',
     HEADLESS: process.env.HEADLESS === 'true',
     DRY_RUN: process.env.DRY_RUN === 'true',
     LOG_LEVEL: process.env.LOG_LEVEL || 'info',
