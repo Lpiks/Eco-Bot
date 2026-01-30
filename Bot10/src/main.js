@@ -60,14 +60,14 @@ async function processOrder(iteration) {
             logger.warn('Warm up deviation:', e);
         }
 
-        // --- Interaction Logic (LeadForm) ---
+        // --- Interaction Logic (Express Checkout) ---
 
         // 1. Full Name
-        const nameInput = 'input[name="first_name"]';
+        const nameInput = 'input[name="fullName"]';
         if (await page.$(nameInput)) {
             await actionManager.typeHuman(nameInput, identity.fullName);
         } else {
-            logger.warn('Name input (first_name) not found');
+            logger.warn('Name input (fullName) not found');
         }
 
         // 2. Phone
@@ -78,95 +78,97 @@ async function processOrder(iteration) {
             logger.warn('Phone input (phone) not found');
         }
 
-        // 3. Wilaya (Select)
-        const wilayaSelect = 'select[name="province"]';
+        // 3. Wilaya (Dropdown) - Values are simple IDs like "1", "16"
+        const wilayaSelect = 'select[name="wilaya"]';
         try {
             if (await page.$(wilayaSelect)) {
-                // The values are like "16". identity.wilayaCode is "16".
-                // Ensure code is string
-                const code = identity.wilayaCode.toString();
+                // identity.wilayaCode is "01", "16".
+                // Remove leading zeros if present, to match value="1" etc.
+                let code = identity.wilayaCode;
+                if (code.startsWith('0') && code.length > 1) {
+                    code = code.substring(1);
+                }
+
                 // Select option by value
                 await page.select(wilayaSelect, code);
-                logger.info(`Selected Wilaya Code: ${code}`);
 
-                // Wait for the dependent city dropdown to maybe refresh/enable
-                await new Promise(r => setTimeout(r, 1000));
+                // CRITICAL: Dispatch change event to ensure frontend reacts
+                await page.$eval(wilayaSelect, el => {
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                });
+
+                logger.info(`Selected Wilaya: ${identity.wilaya} (Value: ${code})`);
+
+                // Wait for Commune dropdown to populate
+                await new Promise(r => setTimeout(r, 2000));
             } else {
-                logger.warn('Wilaya select (province) not found');
+                logger.warn('Wilaya select (wilaya) not found');
             }
         } catch (e) {
             logger.warn(`Wilaya selection failed: ${e.message}`);
         }
 
-        // 4. Commune/City (Select)
-        const citySelect = 'select[name="city"]';
+        // 4. Commune/Address (Dropdown)
+        const addressSelect = 'select[name="address"]';
         try {
-            if (await page.$(citySelect)) {
+            if (await page.$(addressSelect)) {
+                logger.info('Waiting for Address dropdown to be enabled...');
                 await page.waitForFunction(
-                    (sel) => {
-                        const el = document.querySelector(sel);
+                    (selector) => {
+                        const el = document.querySelector(selector);
+                        // Check if enabled (disabled attribute is false/missing) and has options
                         return el && !el.disabled && el.options.length > 1;
                     },
-                    { timeout: 10000 },
-                    citySelect
+                    { timeout: 15000 },
+                    addressSelect
                 );
 
-                // Option values are uppercase names usually, or match text.
-                // The user HTML shows values like "AIN ZERGA".
-                // We'll try to match identity.commune (which might be mixed case) to option values/text.
-                const targetCommune = identity.commune.toUpperCase();
-
-                const foundValue = await page.$eval(citySelect, (sel, target) => {
-                    const opts = Array.from(sel.options);
-                    // Try exact match or contains
-                    const match = opts.find(o => o.value.toUpperCase() === target || o.text.toUpperCase().includes(target));
-                    return match ? match.value : null;
-                }, targetCommune);
+                const communeName = identity.commune;
+                // Match by text (approximate)
+                const foundValue = await page.$eval(addressSelect, (select, name) => {
+                    const options = Array.from(select.options);
+                    const option = options.find(opt => opt.text.toUpperCase().includes(name.toUpperCase()));
+                    return option ? option.value : null;
+                }, communeName);
 
                 if (foundValue) {
-                    await page.select(citySelect, foundValue);
-                    logger.info(`Selected City: ${foundValue}`);
+                    await actionManager.selectOption(addressSelect, foundValue);
+                    logger.info(`Selected Address/Commune: ${communeName} (Value: ${foundValue})`);
                 } else {
-                    logger.warn(`City '${targetCommune}' not found. Selecting random.`);
-                    await page.$eval(citySelect, sel => {
-                        if (sel.options.length > 1) {
-                            const rnd = Math.floor(Math.random() * (sel.options.length - 1)) + 1;
-                            sel.selectedIndex = rnd;
+                    logger.warn(`Address '${communeName}' not found. Selecting random.`);
+                    await page.$eval(addressSelect, select => {
+                        if (select.options.length > 1) {
+                            const idx = Math.floor(Math.random() * (select.options.length - 1)) + 1;
+                            select.selectedIndex = idx;
+                            select.dispatchEvent(new Event('change', { bubbles: true }));
                         }
                     });
                 }
             } else {
-                logger.warn('City select (city) not found');
+                logger.warn('Address select (address) not found');
             }
         } catch (e) {
-            logger.warn(`City selection failed: ${e.message}`);
+            logger.warn(`Address wait/select failed: ${e.message}`);
         }
 
-        // 5. Address
-        // User requested to SKIP address1
-        // const addressInput = 'input[name="address1"]';
-        // if (await page.$(addressInput)) {
-        //     await actionManager.typeHuman(addressInput, identity.address);
-        // }
-
-        // 6. Shipping (Radio)
-        // Default to Door (value="door")
+        // 5. Delivery Place (Radio)
         try {
-            const doorOption = 'input[name="delivery_type"][value="door"]';
-            if (await page.$(doorOption)) {
-                await page.click(doorOption);
-                logger.info('Selected Door Delivery');
+            const homeRadio = 'input[name="deliveryPlace"][value="at_home"]';
+            if (await page.$(homeRadio)) {
+                await page.click(homeRadio);
+                logger.info('Selected Delivery: Home (at_home)');
             }
         } catch (e) {
-            logger.warn('Shipping selection failed');
+            logger.warn('Delivery place selection failed');
         }
 
-        // 7. Submit
+        // 6. Submit
         if (config.DRY_RUN) {
             logger.info('DRY RUN MODE: Skipping final submit click.');
         } else {
-            const submitBtn = 'button[type="submit"]';
-            const btn = await page.$(submitBtn);
+            // Button is <button type="button" class="btn btn-primary ..."><span>أُطلب الآن</span></button>
+            const submitBtnSelector = 'button.btn-primary';
+            const btn = await page.$(submitBtnSelector);
 
             if (btn) {
                 await btn.click();
